@@ -51,18 +51,34 @@ class Note:
 
     def dirname(self):
         """Return an absolute path for the note's directory."""
-        return  os.path.join(NOTE_DIR,
-                             "%04d" % self.date.year,
-                             "%02d" % self.date.month,
-                             "%02d" % self.date.day,
-                             "%02d" % self.date.hour)
+        return os.path.join(NOTE_DIR,
+                            "%04d" % self.date.year,
+                            "%02d" % self.date.month,
+                            "%02d" % self.date.day,
+                            "%02d" % self.date.hour)
+
+    def head_encode(self):
+        head = self.date.year
+        head = (head * 12) + self.date.month - 1
+        head = (head * 31) + self.date.day - 1
+        head = (head * 24) + self.date.hour
+        return head
 
     @staticmethod
-    def stub_encode(minute, second, microsecond):
+    def head_decode(head):
+        hour = head % 24
+        head = int(head / 24)
+        day = (head % 31) + 1
+        head = int(head / 31)
+        month = (head % 12) + 1
+        year = int(head / 12)
+        return year, month, day, hour
+
+    def stub_encode(self):
         """Encode a subset of a note's datetime to a filename stub."""
-        stub = (((minute * 60) + second) * 10**6 + microsecond)
-        logging.debug("ENCODE %02d:%02d.%06d to stub %08x" %
-                      (minute, second, microsecond, stub))
+        stub = self.date.minute
+        stub = (stub * 60) + self.date.second
+        stub = (stub * 10**6) + self.date.microsecond
         return stub
 
     @staticmethod
@@ -75,11 +91,14 @@ class Note:
                       (stub, minute, second, microsecond))
         return minute, second, microsecond
 
+    def identity(self):
+        """Return and identifier for the note."""
+        return '%08x-%08x-%08x' % (self.head_encode(), self.stub_encode(),
+                                   self.rand)
+
     def filename(self):
         """Return the note's filename."""
-        stub = self.stub_encode(self.date.minute, self.date.second,
-                                self.date.microsecond)
-        return '%08x-%08x.txt' % (stub, self.rand)
+        return '%08x-%08x.txt' % (self.stub_encode(), self.rand)
 
     def realpath(self):
         """Return the abolute pathname for the note."""
@@ -111,6 +130,9 @@ class Note:
                         TZ_UTC)
         rand = int(match.group('rand'), 16)
         return Note(date, rand)
+
+
+
 
 
 class NoteIterator:
@@ -397,12 +419,16 @@ def main_add():
     os.makedirs(note.dirname(), exist_ok=True)
     subprocess.check_call([EDITOR, note.realpath()])
 
-def main_list(notes, filename=False):
+def main_list(notes, identify=False, filename=False):
     """List notes to stdout (WIP)."""
     separate = False
     if filename:
         for note in notes:
             print(note.realpath())
+        return
+    if identify:
+        for note in notes:
+            print(note.identity())
         return
     for note in notes:
         if separate:
@@ -410,6 +436,8 @@ def main_list(notes, filename=False):
         date = note.date.astimezone(TZ_LOCAL)
         date = date.strftime('%Y-%m-%dT%H:%M')
         print("[%d]\tDate: %s" % (notes.index, date))
+        print("\tFile: %s" % note.realpath())
+        print("\tNNID: %s" % note.identity())
         print()
         file = open(note.realpath(), 'r')
         print(file.read())
@@ -457,6 +485,8 @@ def main():
     #                help='Output filename only')
     #ap.add_argument('-fr', '--filerand', action='store_true',
     #                help='Output filename only')
+    ap.add_argument('-id', '--identify', action='store_true',
+                    help='Output identities only')
 
     args = ap.parse_args()
 
@@ -486,7 +516,7 @@ def main():
     if hasattr(args, 'edit'):
         main_edit(notes)
     else:
-        main_list(notes, filename=args.filename)
+        main_list(notes, identify=args.identify, filename=args.filename)
 
 if __name__ == "__main__":
     main()
