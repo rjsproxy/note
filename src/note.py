@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""A command line note manager.
+""" A command line note manager.
 
 Toying with ideas of how to manage notes.
 
@@ -15,8 +15,26 @@ import random
 import re
 import subprocess
 
+
+#
+# NOTE_STORE
+#
 NOTE_DIR = os.environ.get('NOTE_DIR',
                           os.path.join(os.path.expanduser('~'), '.note'))
+
+#
+# Directory depth: single directory (0), group by year (1), group by month (2),
+# group by day (3), etc.
+#
+NOTE_CUT = os.environ.get('NOTE_CUT', 2)
+NOTE_CUT_LABEL = ['year', 'month', 'day', 'minute', 'second', 'microsecond',
+                  'note']
+NOTE_CUT_FMT = ['%04d', '%02d', '%02d', '%02d', '%02d', '%06d',
+                '%08x-%08x-%08x%s']
+NOTE_CUR_RE = [r'^\d{4}$', r'^\d{2}$', r'^\d{2}$', r'^\d{2}$',
+               r'^\d{2}$', r'^\d{2}$', r'^\d{6}$',
+               r'^(?P<note>[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8})(?P<type>\.\S+)$']
+
 EDITOR = os.environ.get('EDITOR', 'vim')
 
 TZ_LOCAL = tz.tzlocal()
@@ -25,17 +43,31 @@ TZ_UTC = tz.tzutc()
 LOGGING_FORMAT = '%(asctime)s [%(filename)s:%(lineno)s - %(funcName)20s() ]' +\
                  '%(message)s'
 LOGGING_LEVEL = logging.INFO
+#LOGGING_LEVEL = logging.DEBUG
 #LOGGING_DATE_FORMAT = '%Y-%m-%d %h:%M'
 # '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
+logging.basicConfig(format=LOGGING_FORMAT, level=LOGGING_LEVEL)
 
 class Note:
     """Interface to a single note.
+
+
+
+        head-tail-rand.type
 
     A note is identified by a (UTC Date, Random Int) tuple.  This class
     is reponsible for mapping this tuple to absolute paths.
     """
 
-    def __init__(self, date=None, rand=None):
+    def __init__(self, date=None, rand=None, mimetypes=[]):
+        """
+        Args:
+            base: base directory  
+            date: note date  
+            rand: random 32-bit randomd
+            type: types ['txt','jpg',...]
+
+        """
         if date is None:
             self.date = datetime.utcnow().replace(tzinfo=TZ_UTC)
         else:
@@ -50,14 +82,16 @@ class Note:
         return "Note(date=%s, rand=%08x)" % (self.date, self.rand)
 
     def dirname(self):
-        """Return an absolute path for the note's directory."""
-        return os.path.join(NOTE_DIR,
-                            "%04d" % self.date.year,
-                            "%02d" % self.date.month,
-                            "%02d" % self.date.day,
-                            "%02d" % self.date.hour)
+        """ Return an absolute path for the note's directory. """
+        name = [NOTE_DIR]
+        for level in range(NOTE_CUT):
+            field = NOTE_CUT_LABEL[level]
+            value = getattr(self.date, field)
+            name.append(NOTE_CUT_FMT[level] % value)
+        return os.path.join(*name)
 
     def head_encode(self):
+        """ Encode head date fields into a 32-bit integer. """
         head = self.date.year
         head = (head * 12) + self.date.month - 1
         head = (head * 31) + self.date.day - 1
@@ -66,6 +100,7 @@ class Note:
 
     @staticmethod
     def head_decode(head):
+        """ Decode a 32-bit integer into head date fields. """
         hour = head % 24
         head = int(head / 24)
         day = (head % 31) + 1
@@ -74,45 +109,63 @@ class Note:
         year = int(head / 12)
         return year, month, day, hour
 
-    def stub_encode(self):
-        """Encode a subset of a note's datetime to a filename stub."""
-        stub = self.date.minute
-        stub = (stub * 60) + self.date.second
-        stub = (stub * 10**6) + self.date.microsecond
-        return stub
+    def tail_encode(self):
+        """ Encode tail date fields into a 32-bit integer. """
+        tail = self.date.minute
+        tail = (tail * 60) + self.date.second
+        tail = (tail * 10**6) + self.date.microsecond
+        return tail
 
     @staticmethod
-    def stub_decode(stub):
-        """Decode a filename stub to a subset of the note's datetime."""
-        microsecond = stub % 10**6
-        second = int((stub / 10**6) % 60)
-        minute = int((stub / 10**6) / 60)
-        logging.debug("decode stub %08x to %02d:%02d.%06d" %
-                      (stub, minute, second, microsecond))
+    def tail_decode(tail):
+        """ Decode tail date fields into a 32-bit integer. """
+        microsecond = tail % 10**6
+        second = int((tail / 10**6) % 60)
+        minute = int((tail / 10**6) / 60)
+        logging.debug("decode tail %08x to %02d:%02d.%06d" %
+                      (tail, minute, second, microsecond))
         return minute, second, microsecond
 
-    def identity(self):
-        """Return and identifier for the note."""
-        return '%08x-%08x-%08x' % (self.head_encode(), self.stub_encode(),
+    def nnid_encode(self):
+        """ Encode date and rand fields into an ID. """
+        return '%08x-%08x-%08x' % (self.head_encode(), self.tail_encode(),
                                    self.rand)
+    @staticmethod
+    def nnid_decode(nnid):
+        """ Decode ID into date and rand fields. """
+        nnid_re = r'^(?P<head>[0-9A-Fa-f]{8})-(?P<tail>[0-9A-Fa-f]{8})-(?P<rand>[0-9A-Fa-f]{8})$'
+        match = re.match(nnid_re, nnid)
+        if not match:
+            raise ArgumentTypeError("could not parse NNID \"%s\"" % nnid)
+        year, month, day, hour = Note.head_decode(int(match.group('head'), 16))
+        minute, second, microsecond = Note.tail_decode(int(match.group('tail'), 16))
+        date = datetime(year, month, day, hour, minute, second, microsecond,
+                        TZ_UTC)
+        rand = int(match.group('rand'), 16)
+        return date, rand
 
     def filename(self):
-        """Return the note's filename."""
-        return '%08x-%08x.txt' % (self.stub_encode(), self.rand)
+        """ Return the note's filename.
+        
+        TODO: This method needs to handle file types. Possibly this method
+        shouldn't exist.
+
+        """
+        return '%08x-%08x-%08x.txt' % (self.head_encode(), self.tail_encode(), self.rand)
 
     def realpath(self):
-        """Return the abolute pathname for the note."""
+        """ Return the abolute pathname for the note. """
         return os.path.join(self.dirname(), self.filename())
 
     @staticmethod
     def absolute_path_to_note(path):
-        """Given an absolute path return a Note instance."""
+        """ Given an absolute path return a Note instance. """
         path_re = os.path.join(NOTE_DIR,
                                r'(?P<year>\d{4})',
                                r'(?P<month>\d{2})',
                                r'(?P<day>\d{2})',
                                r'(?P<hour>\d{2})',
-                               r'(?P<stub>[0-9A-Fa-f]{8})-' +
+                               r'(?P<tail>[0-9A-Fa-f]{8})-' +
                                r'(?P<rand>[0-9A-Fa-f]{8})(?P<type>\S*)')
         logging.debug(path_re)
         pattern = re.compile(r'^'+path_re+r'$')
@@ -123,8 +176,8 @@ class Note:
         month = int(match.group('month'))
         day = int(match.group('day'))
         hour = int(match.group('hour'))
-        stub = int(match.group('stub'), 16)
-        minute, second, microsecond = Note.stub_decode(stub)
+        tail = int(match.group('tail'), 16)
+        minute, second, microsecond = Note.tail_decode(tail)
         assert match.group('type') == '.txt'
         date = datetime(year, month, day, hour, minute, second, microsecond,
                         TZ_UTC)
@@ -135,8 +188,10 @@ class Note:
 
 
 
+
+
 class NoteIterator:
-    """Iterate over a set of notes.
+    """ Iterate over a set of notes.
 
     This class uses a cursor and an array of stacks to track iterations.  The
     cursor is a list of strings that joined together give an absolute path.
@@ -159,17 +214,13 @@ class NoteIterator:
 
     This pop()/push() is then repeated for month, day, hour and item levels.
     """
-    STACK_HEAD = 0
-    CURSOR_BASE = 0
-    CURSOR_YEAR = 1
-    CURSOR_MONTH = 2
-    CURSOR_DAY = 3
-    CURSOR_HOUR = 4
-    CURSOR_ITEM = 5
+
+    # TODO: Better name? Applies to both cursor and stacks.
+    CURSOR_LABEL = ['root'] + NOTE_CUT_LABEL
 
     def __init__(self, since=None, until=None, reverse=False, index_set=None,
                  index_max=None):
-        """Initialise a NoteIterator.
+        """ Initialise a NoteIterator.
 
         Args:
             since: Starting date to iterator from.
@@ -177,9 +228,27 @@ class NoteIterator:
             reverse: Iterate in reverse order, most recent note first.
             index_set: Sorted list of (min,max) index ranges to print.
             index_max: Maximum node index to print.
+
+        Invariants:
+            len(self.stacks) = len(self.cursor) + 1
+
+        Initial condition: ready to push NOTE_DIR onto the cursor and then
+        start searching up directories from there. Initial step is to pop
+        selfSee find_note().
+
+         1  self.cursor = []
+            self.stacks = [[NOTE_DIR]]
+            
+         2  self.cursor = [NOTE_DIR]
+            self.stacks = [[], [...]]
+
+
+
+
+         2  self.cursor = [NOTE_DIR, YEAR]
         """
-        self.cursor = [None] * 6
-        self.stacks = [[NOTE_DIR]] + [[]] * 5
+        self.cursor = []
+        self.stacks = [[NOTE_DIR]]
 
         self.since = since
         self.until = until
@@ -192,32 +261,35 @@ class NoteIterator:
                 self.index_max = min(self.index_max, index_max)
         else:
             self.index_max = index_max
+
+        # Compile patterns expected at cursor/stack depths.
+        self.pattern = [None]
+        for level in range(NOTE_CUT):
+            self.pattern.append(re.compile(NOTE_CUR_RE[level]))
+        self.pattern.append(re.compile(NOTE_CUR_RE[-1]))
         logging.debug("__init__()\n%s" % self)
 
     def __str__(self):
-        rv = "NoteIterator:"
+        rv = "NoteIterator("
         rv += "\n\tcursor: %s" % self.cursor
-        rv += "\n\tstacks: "
-        rv += "Notes: %s" % self.stacks[self.CURSOR_ITEM]
-        rv += "\n\t\tHours: %s" % self.stacks[self.CURSOR_HOUR]
-        rv += "\n\t\tDays: %s" % self.stacks[self.CURSOR_DAY]
-        rv += "\n\t\tMonths: %s" % self.stacks[self.CURSOR_MONTH]
-        rv += "\n\t\tYears: %s" % self.stacks[self.CURSOR_YEAR]
-        rv += "\n\t\tBases: %s" % self.stacks[self.CURSOR_BASE]
+        for level in range(len(self.stacks)):
+            rv += "\n\t%ss: %s" % (self.CURSOR_LABEL[level],
+                                  self.stacks[level])
+        rv += ")"
         return rv
 
     def __iter__(self):
-        """Return the iterator."""
+        """ Return the iterator. """
         return self
 
     def __next__(self):
-        """Return the next note or raise StopIteration."""
+        """ Return the next note or raise StopIteration. """
         done = False
         while not done:
             if self.index_max is not None and self.index_max < self.index + 1:
                 raise StopIteration
-            self.pop(self.CURSOR_ITEM)
-            if not self.cursor[self.CURSOR_ITEM]:
+            note = self.find_note()
+            if note is None:
                 raise StopIteration
             if self.index_set is None:
                 done = True
@@ -227,87 +299,131 @@ class NoteIterator:
                 if index_min <= self.index <= index_max:
                     done = True
                     break
-        path = os.path.join(*self.cursor)
-        return Note.absolute_path_to_note(path=path)
+        return note
 
-    def cursor_date(self, level):
-        """Crop cursor datetime to level.
+    def cursor_path(self):
+        """ Return the current absolute cursor path. """
+        assert len(self.cursor) > 0
+        return os.path.join(*self.cursor)
 
-        TODO: Support filtering at resolution smaller than hour.
-        """
-        param = {'year': 0, 'month': 1, 'day': 1, 'hour': 0, 'minute': 0,
-                 'second': 0, 'microsecond': 0, 'tzinfo': TZ_UTC}
-        if self.CURSOR_YEAR <= level:
-            param['year'] = int(self.cursor[self.CURSOR_YEAR])
-        if self.CURSOR_MONTH <= level:
-            param['month'] = int(self.cursor[self.CURSOR_MONTH])
-        if self.CURSOR_DAY <= level:
-            param['day'] = int(self.cursor[self.CURSOR_DAY])
-        if self.CURSOR_HOUR <= level:
-            param['hour'] = int(self.cursor[self.CURSOR_HOUR])
+    def cursor_date(self):
+        """ Convert cursor to datetime. """
+        param = { 'year': 1, 'month': 1, 'day': 1, 'hour': 0, 'minute': 0,
+                  'second': 0, 'microsecond': 0, 'tzinfo': TZ_UTC }
+        for level in range(1, len(self.cursor)):
+            field = self.CURSOR_LABEL[level]
+            value = int(self.cursor[level])
+            param[field] = value
         return datetime(**param)
 
-    @staticmethod
-    def level_date(date, level):
-        """Crop datetime to level.
-
-        TODO: Support filtering at resolution smaller than hour.
-        """
-        param = {'minute': 0, 'second': 0, 'microsecond': 0, 'tzinfo': TZ_UTC}
-        if level < NoteIterator.CURSOR_YEAR:
-            param['year'] = 0
-        if level < NoteIterator.CURSOR_MONTH:
-            param['month'] = 1
-        if level < NoteIterator.CURSOR_DAY:
-            param['day'] = 1
-        if level < NoteIterator.CURSOR_HOUR:
-            param['hour'] = 0
+    def crop_date(self, date, depth):
+        """ Crop datetime to cursor's level. """
+        param = { 'year': 1, 'month': 1, 'day': 1, 'hour': 0, 'minute': 0,
+                  'second': 0, 'microsecond': 0, 'tzinfo': TZ_UTC }
+        for level in range(1, depth):
+            field = self.CURSOR_LABEL[level]
+            value = getattr(date, field)
+            param[field] = value
         return date.replace(**param)
 
-    def valid(self, level):
-        """Return True if cursor is valid with respect to date range."""
-        if level >= self.CURSOR_YEAR:
-            date = self.cursor_date(level)
-            if ((self.since and date < self.level_date(self.since, level)) or
-                (self.until and (date > self.level_date(self.until, level)))):
-                return False
+    def valid_cursor(self):
+        """ Return True if cursor should be included in iteration.
+        
+        Currently this only includes checks for (since, until) date ranges, but
+        other filters could be added in the future.
+        
+        """
+        level = len(self.cursor)
+        date = self.cursor_date()
+        if ((self.since and date < self.crop_date(self.since, level)) or
+            (self.until and date > self.crop_date(self.until, level))):
+            return False
         return True
 
-    def pop(self, level):
-        """For a given level, move an item from the stack onto the cursor."""
-        self.cursor[level] = None
-        while self.cursor[level] is None:
-            if not self.stacks[level] and level > self.CURSOR_BASE:
-                self.pop(level - 1)
-            if self.stacks[level]:
-                self.cursor[level] = self.stacks[level].pop(self.STACK_HEAD)
-                if self.valid(level):
-                    if level < self.CURSOR_ITEM:
-                        self.push(level + 1)
-                    else:
-                        self.index += 1
-                else:
-                    self.cursor[level] = None
-            else:
-                break
-        logging.debug("pop(level=%d)\n%s" % (level, self))
+    def valid_note(self, note):
+        """ Return True if note should be included in iteration. """
+        if ((self.since and note.date < self.since) or
+            (self.until and note.date > self.until)):
+            return False
+        return True
 
-    def push(self, level):
-        """For a given level, push a new set of items onto the stack."""
-        assert not self.stacks[level]
-        path = os.path.join(*self.cursor[:level])
+    def max_depth(self):
+        """
+        
+        [NOTE_DIR, NOTE_CUTs, notes]
+        
+        """
+        assert len(self.stacks) == len(self.cursor) + 1 # TODO: Required?
+        return len(self.stacks) == NOTE_CUT + 2
+
+    def find_note(self):
+        """ Search for the next note. """
+        while self.cursor or self.stacks[-1]:
+
+            # Descend directory.
+            while not self.max_depth() and self.stacks[-1]:
+                    path = self.stacks[-1].pop()
+                    self.cursor.append(path)
+                    if self.valid_cursor():
+                        self.stack_push()
+                    else:
+                        self.cursor.pop()
+
+            # Find a note.
+            if self.max_depth():
+                while self.stacks[-1]:
+                    note_nnid, note_types = self.stacks[-1].pop()
+                    note_date, note_rand = Note.nnid_decode(note_nnid)
+                    note = Note(note_date, note_rand, note_types)
+                    if self.valid_note(note):
+                        self.index += 1
+                        return note
+
+            # Ascend directories.
+            while self.cursor and not self.stacks[-1]:
+                self.cursor.pop()
+                self.stacks.pop()
+
+        return None
+
+    def stack_push(self):
+        """ Push cursor contents onto stack.
+        
+        This function will always increase len(self.stacks) by 1. Depending on
+        stack level the contents appended will either be a list of directory
+        names or a list of (nnid,types) tuples.
+
+        """
         try:
-            self.stacks[level] = os.listdir(path)
-            self.stacks[level].sort()
-            if self.reverse:
-                self.stacks[level] = self.stacks[level][::-1]
-            logging.debug("push(level=%d)\n%s" % (level, self))
+            stack = os.listdir(self.cursor_path())
         except FileNotFoundError:
-            pass
+            self.stacks.append([])
+            return
+        stack.sort()
+        pattern = self.pattern[len(self.stacks)]
+        if len(self.pattern) == len(self.stacks) + 1:
+            comb = []
+            for fn in stack:
+                match = self.pattern[-1].match(fn)
+                if not match:
+                    continue
+                note_date = match.group('note')
+                note_type = match.group('type')
+                if comb and comb[-1][0] == note_date:
+                    comb[-1][1].add(note_type)
+                else:
+                    comb.append((note_date, set([note_type])))
+            stack = comb
+        else:
+            stack = [fn for fn in stack if pattern.match(fn)]
+        if not self.reverse:
+            stack = stack[::-1]
+        self.stacks.append(stack)
+        logging.debug("NoteIterator.stack_push: %s" % self)
 
     @staticmethod
     def argparse_datetime(arg, round_up):
-        """Parse local datetime string and return UTC datetime.
+        """ Parse local datetime string and return UTC datetime.
 
         Stick to the ISO datetime definition (yyyy-mm-ddThh:mm:ss.uuuuuu) with
         some shortcuts.  Year can be 2 digits.  Only provide as much of the
@@ -385,17 +501,17 @@ class NoteIterator:
 
     @staticmethod
     def argparse_since(arg):
-        """Round down missing part of local datetime string to UTC datetime."""
+        """ Round down missing part of local datetime string to UTC datetime. """
         return NoteIterator.argparse_datetime(arg, round_up=False)
 
     @staticmethod
     def argparse_until(arg):
-        """Round up missing part of local datetime string to UTC datetime."""
+        """ Round up missing part of local datetime string to UTC datetime. """
         return NoteIterator.argparse_datetime(arg, round_up=True)
 
     @staticmethod
     def argparse_range(arg):
-        """Parse range string into ordered list of (min,max) tuples."""
+        """ Parse range string into ordered list of (min,max) tuples. """
         match = re.match(r'((^|,)\d+(-\d+)?)+$', arg)
         if not match:
             raise ArgumentTypeError("could not parse range \"%s\"" % arg)
@@ -413,22 +529,26 @@ class NoteIterator:
 
 
 def main_add():
-    """Create a new note (WIP)."""
+    """ Create a new note (WIP). """
     note = Note()
     # TODO: May leave empty directories.
     os.makedirs(note.dirname(), exist_ok=True)
     subprocess.check_call([EDITOR, note.realpath()])
 
-def main_list(notes, identify=False, filename=False):
-    """List notes to stdout (WIP)."""
+def main_list(notes, identify=False, filename=False, realpath=False):
+    """ List notes to stdout (WIP). """
     separate = False
     if filename:
+        for note in notes:
+            print(note.filename())
+        return
+    if realpath:
         for note in notes:
             print(note.realpath())
         return
     if identify:
         for note in notes:
-            print(note.identity())
+            print(note.nnid_encode())
         return
     for note in notes:
         if separate:
@@ -437,7 +557,7 @@ def main_list(notes, identify=False, filename=False):
         date = date.strftime('%Y-%m-%dT%H:%M')
         print("[%d]\tDate: %s" % (notes.index, date))
         print("\tFile: %s" % note.realpath())
-        print("\tNNID: %s" % note.identity())
+        print("\tNNID: %s" % note.nnid_encode())
         print()
         file = open(note.realpath(), 'r')
         print(file.read())
@@ -445,7 +565,7 @@ def main_list(notes, identify=False, filename=False):
         separate = True
 
 def main_edit(notes):
-    """Edit a set of notes (WIP)."""
+    """ Edit a set of notes (WIP). """
     paths = []
     for note in notes:
         paths.append(note.realpath())
@@ -453,14 +573,14 @@ def main_edit(notes):
         subprocess.check_call([EDITOR] + paths)
 
 def main():
-    """Parse command line arguments."""
+    """ Parse command line arguments. """
     ap = ArgumentParser(prog='note',
                         description='Manage your notes.',
                         epilog='Feedback welcome.')
 
     # Iterator Arguments.
     ap.add_argument('date', type=str, nargs='?',
-                    help='Note date to operate on.')
+                    help='Note date or nnid to operate on.')
     ap.add_argument('-s', '--since', type=NoteIterator.argparse_since,
                     help='Earliest date to iterate from. Overrides date.')
     ap.add_argument('-u', '--until', type=NoteIterator.argparse_until,
@@ -479,6 +599,8 @@ def main():
     #ap.add_argument('-d', '--delete', action=store_true, help='Delete a note')
 
     # Output Modifies.
+    ap.add_argument('-rp', '--realpath', action='store_true',
+                    help='Output filename only')
     ap.add_argument('-fn', '--filename', action='store_true',
                     help='Output filename only')
     #ap.add_argument('-ft', '--filetype', action='store_true',
@@ -490,7 +612,9 @@ def main():
 
     args = ap.parse_args()
 
-    # Date.
+    # 
+    # Note date or identity.
+    #
     if args.date is not None:
         if args.since is None:
             args.since = NoteIterator.argparse_since(args.date)
@@ -516,7 +640,8 @@ def main():
     if hasattr(args, 'edit'):
         main_edit(notes)
     else:
-        main_list(notes, identify=args.identify, filename=args.filename)
+        main_list(notes, identify=args.identify, realpath=args.realpath,
+                  filename=args.filename)
 
 if __name__ == "__main__":
     main()
