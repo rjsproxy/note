@@ -31,9 +31,9 @@ NOTE_CUT_LABEL = ['year', 'month', 'day', 'minute', 'second', 'microsecond',
                   'note']
 NOTE_CUT_FMT = ['%04d', '%02d', '%02d', '%02d', '%02d', '%06d',
                 '%08x-%08x-%08x%s']
-NOTE_CUR_RE = [r'^\d{4}$', r'^\d{2}$', r'^\d{2}$', r'^\d{2}$',
+NOTE_CUT_RE = [r'^\d{4}$', r'^\d{2}$', r'^\d{2}$', r'^\d{2}$',
                r'^\d{2}$', r'^\d{2}$', r'^\d{6}$',
-               r'^(?P<note>[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8})(?P<type>\.\S+)$']
+               r'^(?P<nnid>[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8})(?P<type>\.\S+)$']
 
 EDITOR = os.environ.get('EDITOR', 'vim')
 
@@ -59,27 +59,35 @@ class Note:
     is reponsible for mapping this tuple to absolute paths.
     """
 
-    def __init__(self, date=None, rand=None, mimetypes=[]):
-        """
+    RAND_MIN = 0x00000000
+    RAND_MAX = 0xffffffff
+
+    def __init__(self, date=None, rand=None, exts=None):
+        """ Initialise a note.
+
         Args:
-            base: base directory  
-            date: note date  
-            rand: random 32-bit randomd
-            type: types ['txt','jpg',...]
+            date: Note date in UTC. The current time will be used if none is
+                  supplied.
+            rand: 32-bit random identifier. A random value will be generated if
+                  none is supplied.
+            exts: Filename extension list ['.txt','.jpg', ...]. If note with no
+                  type is considered to be abstract and primarily used for
+                  iteration.
 
         """
         if date is None:
             self.date = datetime.utcnow().replace(tzinfo=TZ_UTC)
         else:
             self.date = date
-
         if rand is None:
-            self.rand = random.randint(0, 0xffffffff)
+            self.rand = random.randint(self.RAND_MIN, self.RAND_MAX)
         else:
             self.rand = rand
+        self.exts = exts
 
     def __str__(self):
-        return "Note(date=%s, rand=%08x)" % (self.date, self.rand)
+        return "Note(date=%s, rand=%08x, type=%s)" % (self.date, self.rand,
+                                                      self.exts)
 
     def dirname(self):
         """ Return an absolute path for the note's directory. """
@@ -144,18 +152,27 @@ class Note:
         rand = int(match.group('rand'), 16)
         return date, rand
 
-    def filename(self):
-        """ Return the note's filename.
-        
-        TODO: This method needs to handle file types. Possibly this method
-        shouldn't exist.
+    def filenames(self):
+        """ Return a list of the note's filenames. """
+        head = self.head_encode()
+        tail = self.tail_encode()
+        names = []
+        for ext in self.exts:
+            names.append('%08x-%08x-%08x%s' % (head, tail, self.rand, ext)
+        return names
 
-        """
-        return '%08x-%08x-%08x.txt' % (self.head_encode(), self.tail_encode(), self.rand)
+    def realpaths(self):
+        """ Return a list of the note's abolute filenames. """
+        dirname = self.dirname()
+        names = self.filenames()
+        paths = []
+        for name in names:
+            paths.append(os.path.join(dirname, name)
+        return paths
 
-    def realpath(self):
-        """ Return the abolute pathname for the note. """
-        return os.path.join(self.dirname(), self.filename())
+#
+# RJS - you are here.... addint .exts member.
+#
 
     @staticmethod
     def absolute_path_to_note(path):
@@ -184,10 +201,16 @@ class Note:
         rand = int(match.group('rand'), 16)
         return Note(date, rand)
 
-
-
-
-
+    @staticmethod
+    def filename_to_note(name):
+        """ Return a Note for the given name. """
+        match = re.match(NOTE_CUT_RE[-1], name)
+        if not match:
+            raise ArgumentTypeError("Unexpected filename \"%s\"" % name)
+        note_nnid = match.group('nnid')
+        node_type = match.group('type')
+        note_date, note_rand = Note.nnid_decode(note_nnid)
+        return Note(note_date, note_rand, [node_type])
 
 
 class NoteIterator:
@@ -219,7 +242,7 @@ class NoteIterator:
     CURSOR_LABEL = ['root'] + NOTE_CUT_LABEL
 
     def __init__(self, since=None, until=None, reverse=False, index_set=None,
-                 index_max=None):
+                 index_max=None, type_filter=None):
         """ Initialise a NoteIterator.
 
         Args:
@@ -242,11 +265,10 @@ class NoteIterator:
          2  self.cursor = [NOTE_DIR]
             self.stacks = [[], [...]]
 
-
-
-
          2  self.cursor = [NOTE_DIR, YEAR]
         """
+        assert type_filter is None, "Future implementation."
+
         self.cursor = []
         self.stacks = [[NOTE_DIR]]
 
@@ -265,8 +287,8 @@ class NoteIterator:
         # Compile patterns expected at cursor/stack depths.
         self.pattern = [None]
         for level in range(NOTE_CUT):
-            self.pattern.append(re.compile(NOTE_CUR_RE[level]))
-        self.pattern.append(re.compile(NOTE_CUR_RE[-1]))
+            self.pattern.append(re.compile(NOTE_CUT_RE[level]))
+        self.pattern.append(re.compile(NOTE_CUT_RE[-1]))
         logging.debug("__init__()\n%s" % self)
 
     def __str__(self):
@@ -407,12 +429,12 @@ class NoteIterator:
                 match = self.pattern[-1].match(fn)
                 if not match:
                     continue
-                note_date = match.group('note')
+                note_nnid = match.group('nnid')
                 note_type = match.group('type')
-                if comb and comb[-1][0] == note_date:
+                if comb and comb[-1][0] == note_nnid:
                     comb[-1][1].add(note_type)
                 else:
-                    comb.append((note_date, set([note_type])))
+                    comb.append((note_nnid, set([note_type])))
             stack = comb
         else:
             stack = [fn for fn in stack if pattern.match(fn)]
@@ -591,6 +613,7 @@ def main():
                     help='Stop after n notes.')
     ap.add_argument('-o', '--order', choices=['forward', 'reverse'],
                     default='reverse', help='Order notes.')
+    ap.add_argument('-n', '--note', type=str, help='Note to act on.')
 
     # Note Operation.
     ap.add_argument('-a', '--add', action='store_true', help='Add a note.')
@@ -629,13 +652,15 @@ def main():
     if hasattr(args, 'edit') and args.edit is not None:
         args.index = args.edit
 
-    # Create iterator.
-    notes = NoteIterator(reverse=(args.order == 'reverse'),
-                         since=args.since,
-                         until=args.until,
-                         index_max=args.count,
-                         index_set=args.index)
-
+    # Single note.
+    if args.note:
+        notes = [Note.filename_to_note(args.note)]
+    else: # Create iterator.
+        notes = NoteIterator(reverse=(args.order == 'reverse'),
+                             since=args.since,
+                             until=args.until,
+                             index_max=args.count,
+                             index_set=args.index)
 
     if hasattr(args, 'edit'):
         main_edit(notes)
