@@ -33,7 +33,7 @@ NOTE_CUT_FMT = ['%04d', '%02d', '%02d', '%02d', '%02d', '%06d',
                 '%08x-%08x-%08x%s']
 NOTE_CUT_RE = [r'^\d{4}$', r'^\d{2}$', r'^\d{2}$', r'^\d{2}$',
                r'^\d{2}$', r'^\d{2}$', r'^\d{6}$',
-               r'^(?P<nnid>[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8})(?P<type>\.\S+)$']
+               r'^(?P<nnid>[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8})(?P<ext>\.\S+)$']
 
 EDITOR = os.environ.get('EDITOR', 'vim')
 
@@ -83,7 +83,7 @@ class Note:
             self.rand = random.randint(self.RAND_MIN, self.RAND_MAX)
         else:
             self.rand = rand
-        self.exts = set(exts)
+        self.exts = exts
 
     def __str__(self):
         return "Note(date=%s, rand=%08x, type=%s)" % (self.date, self.rand,
@@ -200,10 +200,101 @@ class Note:
         if not match:
             raise ArgumentTypeError("Unexpected filename \"%s\"" % name)
         note_nnid = match.group('nnid')
-        node_type = match.group('type')
+        note_ext = match.group('ext')
         note_date, note_rand = Note.nnid_decode(note_nnid)
-        return Note(note_date, note_rand, [node_type])
+        return Note(note_date, note_rand, [note_ext])
 
+    @staticmethod
+    def argparse(arg, round_up=False):
+        """ Parse local datetime string and return UTC datetime.
+
+        Stick to the ISO datetime definition (yyyy-mm-ddThh:mm:ss.uuuuuu) with
+        some shortcuts.  Year can be 2 digits.  Only provide as much of the
+        datetime as you need: e.g., 17 is a valid string for the 17th year in
+        the current century.
+
+        TODO: Fixup comments, possibly break-up function.
+
+        round_up=False -> since
+        round_up=True -> until
+        has no effect if arg is an nnid.
+
+        """
+
+        # Check for NNID.
+        try:
+            date, rand = Note.nnid_decode(arg)
+            return Note(date, rand)
+        except ArgumentTypeError:
+            pass
+
+        # Construct a regex and parse argument.
+        regex = [r'^(?P<year>\d{4}|\d{2})', r'-(?P<month>\d{1,2})',
+                 r'-(?P<day>\d{1,2})', r'T(?P<hour>\d{1,2})',
+                 r':(?P<minute>\d{1,2})', r':(?P<second>\d{1,2})',
+                 r'\.(?P<microsecond>\d{6})']
+        regex = reduce(lambda a, b: b+'('+a+')?', regex[::-1][1:], regex[-1])
+        regex += '$'
+        pattern = re.compile(regex)
+        match = pattern.match(arg)
+        if not match:
+            raise ArgumentTypeError("could not parse datetime \"%s\"" % arg)
+
+        # Optional parameters.
+        param = {'month': 1, 'day': 1, 'hour': 0, 'minute': 0, 'second': 0,
+                 'microsecond': 0}
+        for field in param.keys():
+            value = match.group(field)
+            if value:
+                param[field] = int(value)
+
+        # Mandatory parameters.
+        param['tzinfo'] = TZ_LOCAL
+        year = match.group('year')
+        if year:
+            year = int(year)
+            if year < 100:
+                cent = datetime.now().year
+                year += cent - (cent % 100)
+            param['year'] = year
+        else: # Should be impossible given regex.
+            raise ArgumentTypeError("no year in datetime \"%s\"" % arg)
+
+        # Validate (TODO: check day is valid w.r.t. month).
+        limit = {'month': 12, 'day': 31, 'hour': 24, 'minute': 59,
+                 'second': 59}
+        for field in limit.keys():
+            if param[field] > limit[field]:
+                raise ArgumentTypeError("%s %d is greater expected limit %d" %
+                                        (field, param[field], limit[field]))
+
+        # Return UTC value.
+        date = datetime(**param)
+
+        # Until date, so we want to round up to next year, month, day or hour.
+        if round_up:
+            level = len([x for x in match.groupdict().values()
+                         if x is not None])
+            if level == 1:
+                date = date.replace(year=date.year+1)
+            if level == 2:
+                if date.month < 12:
+                    date = date.replace(month=date.month+1)
+                else:
+                    date = date.replace(year=date.year+1, month=1)
+            if level == 3:
+                date = date + timedelta(days=1)
+            if level == 4:
+                date = date + timedelta(hours=1)
+            if level == 5:
+                date = date + timedelta(minutes=1)
+            if level == 6:
+                date = date + timedelta(seconds=1)
+            if level < 7:
+                date = date - timedelta(microseconds=1)
+            logging.debug("UNTIL: %s" % date)
+
+        return Note(date=date.astimezone(TZ_UTC), rand=Note.RAND_MIN)
 
 class NoteIterator:
     """ Iterate over a set of notes.
@@ -238,8 +329,8 @@ class NoteIterator:
         """ Initialise a NoteIterator.
 
         Args:
-            since: Starting date to iterator from.
-            until: Last date to iterate until.
+            since: Starting note to iterate from.
+            until: Last note to iterate until.
             reverse: Iterate in reverse order, most recent note first.
             index_set: Sorted list of (min,max) index ranges to print.
             index_max: Maximum node index to print.
@@ -349,16 +440,25 @@ class NoteIterator:
         """
         level = len(self.cursor)
         date = self.cursor_date()
-        if ((self.since and date < self.crop_date(self.since, level)) or
-            (self.until and date > self.crop_date(self.until, level))):
+        if ((self.since and date < self.crop_date(self.since.date, level)) or
+            (self.until and date > self.crop_date(self.until.date, level))):
             return False
         return True
 
     def valid_note(self, note):
         """ Return True if note should be included in iteration. """
-        if ((self.since and note.date < self.since) or
-            (self.until and note.date > self.until)):
-            return False
+        if self.since:
+            if note.date < self.since.date:
+                return False
+            if note.date == self.since.date and note.rand < self.since.rand:
+                return False
+
+        if self.until:
+            if note.date > self.until.date:
+                return False
+            if note.date == self.until.date and note.rand > self.until.rand:
+                return False
+
         return True
 
     def max_depth(self):
@@ -386,9 +486,9 @@ class NoteIterator:
             # Find a note.
             if self.max_depth():
                 while self.stacks[-1]:
-                    note_nnid, note_types = self.stacks[-1].pop()
+                    note_nnid, note_exts = self.stacks[-1].pop()
                     note_date, note_rand = Note.nnid_decode(note_nnid)
-                    note = Note(note_date, note_rand, note_types)
+                    note = Note(note_date, note_rand, note_exts)
                     if self.valid_note(note):
                         self.index += 1
                         return note
@@ -405,7 +505,7 @@ class NoteIterator:
         
         This function will always increase len(self.stacks) by 1. Depending on
         stack level the contents appended will either be a list of directory
-        names or a list of (nnid,types) tuples.
+        names or a list of (nnid,exts) tuples.
 
         """
         try:
@@ -422,11 +522,11 @@ class NoteIterator:
                 if not match:
                     continue
                 note_nnid = match.group('nnid')
-                note_type = match.group('type')
+                note_ext = match.group('ext')
                 if comb and comb[-1][0] == note_nnid:
-                    comb[-1][1].add(note_type)
+                    comb[-1][1].add(note_ext)
                 else:
-                    comb.append((note_nnid, set([note_type])))
+                    comb.append((note_nnid, set([note_ext])))
             stack = comb
         else:
             stack = [fn for fn in stack if pattern.match(fn)]
@@ -435,93 +535,6 @@ class NoteIterator:
         self.stacks.append(stack)
         logging.debug("NoteIterator.stack_push: %s" % self)
 
-    @staticmethod
-    def argparse_datetime(arg, round_up):
-        """ Parse local datetime string and return UTC datetime.
-
-        Stick to the ISO datetime definition (yyyy-mm-ddThh:mm:ss.uuuuuu) with
-        some shortcuts.  Year can be 2 digits.  Only provide as much of the
-        datetime as you need: e.g., 17 is a valid string for the 17th year in
-        the current century.
-        """
-
-        # Construct a regex and parse argument.
-        regex = [r'^(?P<year>\d{4}|\d{2})', r'-(?P<month>\d{1,2})',
-                 r'-(?P<day>\d{1,2})', r'T(?P<hour>\d{1,2})',
-                 r':(?P<minute>\d{1,2})', r':(?P<second>\d{1,2})',
-                 r'\.(?P<microsecond>\d{6})']
-        regex = reduce(lambda a, b: b+'('+a+')?', regex[::-1][1:], regex[-1])
-        regex += '$'
-        pattern = re.compile(regex)
-        match = pattern.match(arg)
-        if not match:
-            raise ArgumentTypeError("could not parse datetime \"%s\"" % arg)
-
-        # Optional parameters.
-        param = {'month': 1, 'day': 1, 'hour': 0, 'minute': 0, 'second': 0,
-                 'microsecond': 0}
-        for field in param.keys():
-            value = match.group(field)
-            if value:
-                param[field] = int(value)
-
-        # Mandatory parameters.
-        param['tzinfo'] = TZ_LOCAL
-        year = match.group('year')
-        if year:
-            year = int(year)
-            if year < 100:
-                cent = datetime.now().year
-                year += cent - (cent % 100)
-            param['year'] = year
-        else: # Should be impossible given regex.
-            raise ArgumentTypeError("no year in datetime \"%s\"" % arg)
-
-        # Validate (TODO: check day is valid w.r.t. month).
-        limit = {'month': 12, 'day': 31, 'hour': 24, 'minute': 59,
-                 'second': 59}
-        for field in limit.keys():
-            if param[field] > limit[field]:
-                raise ArgumentTypeError("%s %d is greater expected limit %d" %
-                                        (field, param[field], limit[field]))
-
-        # Return UTC value.
-        date = datetime(**param)
-
-        # Until date, so we want to round up to next year, month, day or hour.
-        if round_up:
-            level = len([x for x in match.groupdict().values()
-                         if x is not None])
-            if level == 1:
-                date = date.replace(year=date.year+1)
-            if level == 2:
-                if date.month < 12:
-                    date = date.replace(month=date.month+1)
-                else:
-                    date = date.replace(year=date.year+1, month=1)
-            if level == 3:
-                date = date + timedelta(days=1)
-            if level == 4:
-                date = date + timedelta(hours=1)
-            if level == 5:
-                date = date + timedelta(minutes=1)
-            if level == 6:
-                date = date + timedelta(seconds=1)
-            if level < 7:
-                date = date - timedelta(microseconds=1)
-            logging.debug("UNTIL: %s" % date)
-
-        return date.astimezone(TZ_UTC)
-
-    @staticmethod
-    def argparse_since(arg):
-        """ Round down missing part of local datetime string to UTC datetime. """
-        return NoteIterator.argparse_datetime(arg, round_up=False)
-
-    @staticmethod
-    def argparse_until(arg):
-        """ Round up missing part of local datetime string to UTC datetime. """
-        return NoteIterator.argparse_datetime(arg, round_up=True)
 
     @staticmethod
     def argparse_range(arg):
@@ -602,14 +615,14 @@ def main():
     """ Parse command line arguments. """
     ap = ArgumentParser(prog='note',
                         description='Manage your notes.',
-                        epilog='Feedback welcome.')
+                        epilog='''Feedback welcome.''')
 
     # Iterator Arguments.
-    ap.add_argument('date', type=str, nargs='?',
-                    help='Note date or nnid to operate on.')
-    ap.add_argument('-s', '--since', type=NoteIterator.argparse_since,
+    ap.add_argument('note', type=str, nargs='?',
+                    help='Note date or NNID to operate on.')
+    ap.add_argument('-s', '--since', type=Note.argparse,
                     help='Earliest date to iterate from. Overrides date.')
-    ap.add_argument('-u', '--until', type=NoteIterator.argparse_until,
+    ap.add_argument('-u', '--until', type=lambda x: Note.argparse(x, True),
                     help='Latest date to iterate until. Overrides date.')
     ap.add_argument('-i', '--index', type=NoteIterator.argparse_range,
                     help='Select index of notes: e.g., \"1-2,5,6-8\".')
@@ -617,7 +630,8 @@ def main():
                     help='Stop after n notes.')
     ap.add_argument('-o', '--order', choices=['forward', 'reverse'],
                     default='reverse', help='Order notes.')
-    ap.add_argument('-n', '--note', type=str, help='Note to act on.')
+    # Deprecated.
+    #ap.add_argument('-n', '--note', type=str, help='Note to act on.')
 
     # Note Operation.
     ap.add_argument('-a', '--add', action='store_true', help='Add a note.')
@@ -640,13 +654,13 @@ def main():
     args = ap.parse_args()
 
     # 
-    # Note date or identity.
+    # Note date or identity.  RJS: Using notes as iterators?
     #
-    if args.date is not None:
+    if args.note is not None:
         if args.since is None:
-            args.since = NoteIterator.argparse_since(args.date)
+            args.since = Note.argparse(args.note)
         if args.until is None:
-            args.until = NoteIterator.argparse_until(args.date)
+            args.until = Note.argparse(args.note, True)
 
     if args.add:
         main_add()
@@ -657,14 +671,11 @@ def main():
         args.index = args.edit
 
     # Single note.
-    if args.note:
-        notes = [Note.filename_to_note(args.note)]
-    else: # Create iterator.
-        notes = NoteIterator(reverse=(args.order == 'reverse'),
-                             since=args.since,
-                             until=args.until,
-                             index_max=args.count,
-                             index_set=args.index)
+    notes = NoteIterator(reverse=(args.order == 'reverse'),
+                         since=args.since,
+                         until=args.until,
+                         index_max=args.count,
+                         index_set=args.index)
 
     if hasattr(args, 'edit'):
         main_edit(notes)
