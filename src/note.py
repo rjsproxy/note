@@ -83,7 +83,7 @@ class Note:
             self.rand = random.randint(self.RAND_MIN, self.RAND_MAX)
         else:
             self.rand = rand
-        self.exts = exts
+        self.exts = set(exts)
 
     def __str__(self):
         return "Note(date=%s, rand=%08x, type=%s)" % (self.date, self.rand,
@@ -152,27 +152,19 @@ class Note:
         rand = int(match.group('rand'), 16)
         return date, rand
 
-    def filenames(self):
+    def filename(self):
         """ Return a list of the note's filenames. """
         head = self.head_encode()
         tail = self.tail_encode()
-        names = []
-        for ext in self.exts:
-            names.append('%08x-%08x-%08x%s' % (head, tail, self.rand, ext)
-        return names
+        return '%08x-%08x-%08x' % (head, tail, self.rand)
 
-    def realpaths(self):
+    def realpath(self):
         """ Return a list of the note's abolute filenames. """
-        dirname = self.dirname()
-        names = self.filenames()
-        paths = []
-        for name in names:
-            paths.append(os.path.join(dirname, name)
-        return paths
+        return os.path.join(self.dirname(), self.filename())
 
-#
-# RJS - you are here.... addint .exts member.
-#
+    def extensions(self):
+        """ Return the set of filename extensions for this note. """
+        return self.exts
 
     @staticmethod
     def absolute_path_to_note(path):
@@ -552,21 +544,25 @@ class NoteIterator:
 
 def main_add():
     """ Create a new note (WIP). """
-    note = Note()
+    note = Note(exts=['.txt'])
     # TODO: May leave empty directories.
     os.makedirs(note.dirname(), exist_ok=True)
-    subprocess.check_call([EDITOR, note.realpath()])
+    subprocess.check_call([EDITOR, note.realpath() + '.txt'])
 
 def main_list(notes, identify=False, filename=False, realpath=False):
     """ List notes to stdout (WIP). """
     separate = False
     if filename:
         for note in notes:
-            print(note.filename())
+            name = note.filename()
+            for ext in note.extensions():
+                print(name + ext)
         return
     if realpath:
         for note in notes:
-            print(note.realpath())
+            path = note.realpath()
+            for ext in note.extensions():
+                print(path + ext)
         return
     if identify:
         for note in notes:
@@ -577,20 +573,28 @@ def main_list(notes, identify=False, filename=False, realpath=False):
             print()
         date = note.date.astimezone(TZ_LOCAL)
         date = date.strftime('%Y-%m-%dT%H:%M')
-        print("[%d]\tDate: %s" % (notes.index, date))
-        print("\tFile: %s" % note.realpath())
-        print("\tNNID: %s" % note.nnid_encode())
+        print("[%d]\tNNID: %s" % (notes.index, note.filename()))
+        print("\tDate: %s" % date)
+        path = note.realpath()
+        print("\tPath: %s" % path)
+        exts = note.extensions()
+        print("\tExts: %s" % exts)
         print()
-        file = open(note.realpath(), 'r')
-        print(file.read())
-        file.close()
-        separate = True
+        for ext in exts:
+            if ext in ['.txt', '.rst', '.md', '.mw']:
+                file = open(path + ext)
+                print(file.read())
+                file.close()
+                separate = True
 
 def main_edit(notes):
     """ Edit a set of notes (WIP). """
     paths = []
     for note in notes:
-        paths.append(note.realpath())
+        path = note.realpath()
+        for ext in note.extensions():
+            if ext in ['.txt','.rst']:
+                paths.append(path + ext)
     if paths:
         subprocess.check_call([EDITOR] + paths)
 
