@@ -36,6 +36,9 @@ NOTE_CUT_RE = [r'^\d{4}$', r'^\d{2}$', r'^\d{2}$', r'^\d{2}$',
                r'^\d{2}$', r'^\d{2}$', r'^\d{6}$',
                r'^(?P<nnid>[0-9a-f]{8}-[0-9a-f]{8}-[0-9a-f]{8})(?P<ext>\.\S+)$']
 
+# Grep'able note extensions.
+NOTE_EXT_GREP = ['.txt', '.rst', '.mw']
+
 EDITOR = os.environ.get('EDITOR', 'vim')
 
 TZ_LOCAL = tz.tzlocal()
@@ -255,9 +258,13 @@ class Note:
         """ Return a note's abolute filename. """
         return os.path.join(self.dirname(), self.filename())
 
-    def extensions(self):
+    def extensions(self, grep=False):
         """ Return the set of filename extensions for this note. """
-        return self.exts
+        if grep:
+            exts = [ext for ext in self.exts if ext in NOTE_EXT_GREP]
+        else:
+            exts = self.exts
+        return exts
 
     @staticmethod
     def absolute_path_to_note(path):
@@ -421,7 +428,7 @@ class NoteIterator:
     CURSOR_LABEL = ['root'] + NOTE_CUT_LABEL
 
     def __init__(self, since=None, until=None, reverse=False, index_set=None,
-                 index_max=None, select=None, exclude=None):
+                 index_max=None, select=None, exclude=None, grep=None):
         """ Initialise a NoteIterator.
 
         Args:
@@ -462,6 +469,11 @@ class NoteIterator:
                 self.index_max = min(self.index_max, index_max)
         else:
             self.index_max = index_max
+
+        if grep:
+            self.grep = re.compile(grep)
+        else:
+            self.grep = None
 
         # Attributes
         self.select_extensions, self.select_attributes = \
@@ -516,8 +528,8 @@ class NoteIterator:
             for attr in attributes:
                 if attr.key[0] == '.':
                     if attr.value:
-                        raise ArgumentTypeError("Unexpected extension value: %s",
-                                                attr)
+                        raise ArgumentTypeError(
+                                "Unexpected extension value: %s" % attr)
                     exts.add(attr.key)
                 else:
                     meta.add(attr)
@@ -564,6 +576,8 @@ class NoteIterator:
 
     def valid_note(self, note):
         """ Return True if note should be included in iteration. """
+
+        # Date filters.
         if self.since:
             if note.date < self.since.date:
                 return False
@@ -601,7 +615,25 @@ class NoteIterator:
                 if note.meta.select_attribute(attr):
                     return False
 
+        # Contents filters.
+        if not self.valid_note_contents(note):
+            return False
+
         return True
+
+    def valid_note_contents(self, note):
+        """ Return note contains the grep pattern or no pattern defined. """
+        if self.grep:
+            path = note.realpath()
+            for ext in note.extensions(grep=True):
+                with open(path + ext, 'r') as textfile:
+                    for line in textfile:
+                        if self.grep.search(line):
+                            return True
+        else:
+            return True
+
+        return False
 
     def max_depth(self):
         """
@@ -737,7 +769,7 @@ def main_list(notes, identify=False, filename=False, realpath=False):
         text = "\tAttr:"
         for attr in note.meta.attributes():
             text += " %s" % attr
-        print(text)
+        print(text + "\n")
         for ext in exts:
             if ext in ['.txt', '.rst', '.md', '.mw']:
                 file = open(path + ext)
@@ -776,6 +808,10 @@ def main():
     ap.add_argument('-o', '--order', choices=['forward', 'reverse'],
                     default='reverse', help='Order notes.')
 
+    # Grepping.
+    ap.add_argument('-g', '--grep', type=str,
+                    help='Select files matching pattern')
+
     # Tagging.
     ap.add_argument('-ts', '--tag-select', type=NoteAttribute.decode,
                     nargs='*', help='Tag a note.')
@@ -806,6 +842,7 @@ def main():
 
     args = ap.parse_args()
     #print(args)
+    #return
 
     # 
     # Note date or identity.  RJS: Using notes as iterators?
@@ -831,7 +868,8 @@ def main():
                          index_max=args.count,
                          index_set=args.index,
                          select=args.tag_select,
-                         exclude=args.tag_exclude)
+                         exclude=args.tag_exclude,
+                         grep=args.grep)
 
     if args.tag_remove or args.tag_assign:
         for note in notes:
