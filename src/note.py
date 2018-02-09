@@ -11,6 +11,7 @@ from dateutil import tz
 from functools import reduce
 import logging
 import os
+import pickle
 import random
 import re
 import subprocess
@@ -48,6 +49,85 @@ LOGGING_LEVEL = logging.INFO
 # '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
 logging.basicConfig(format=LOGGING_FORMAT, level=LOGGING_LEVEL)
 
+class NoteAttribute:
+    """ Abstraction for note attributes.
+
+        An attribute is a (key, value) tuple with both being strings.  There
+        are two special cases: (1) keys beginning with underscores are intended
+        for internal/defined use; (2) keys beginning with a dot are used by the
+        CLI to select filename extensions and should never be saved.
+    """
+
+    def __init__(self, key=None, value=None):
+        self.key = key
+        self.value = value
+
+    def __repr__(self):
+        return "NoteAttribute(\"%s\", \"%s\")" % (self.key, self.value)
+
+    def __str__(self):
+        result = str(self.key)
+        if self.value:
+            result += '=' + str(self.value)
+        return result
+
+    @staticmethod
+    def decode(attr):
+        """ Convert a string into a NoteAttribute. """
+        match = re.match(r'(?P<key>[^=]+)(=(?P<value>.+))?', attr)
+        if not match:
+            raise ArgumentTypeError("Bad NoteAttribute syntax \"%s\"" % name)
+        key = match.group('key').strip()
+        value = match.group('value')
+        if value:
+            value = value.strip()
+        return NoteAttribute(key, value)
+
+class NoteMetadata:
+    """ Note Metadata Interface. """
+
+    def __init__(self, filename):
+        """ Load metadata from file. """
+        self.filename = filename
+        try:
+            with open(self.filename, 'rb') as metafile:
+                self.attr = pickle.load(metafile)
+        except:
+            # TODO: Metadata needs a version field.
+            self.attr = {}
+
+    def save(self):
+        """ Write current metadata to disk.
+
+            TODO: Error handling?
+        """
+        if self.attr:
+            with open(self.filename, 'w+b') as metafile:
+                pickle.dump(self.attr, metafile)
+
+    def attributes(self):
+        """ """
+        for key, value in self.attr.items():
+            yield NoteAttribute(key,value)
+
+    def select_attribute(self, attr):
+        """ Return true if NoteMetada include attr. """
+        if attr.key not in self.attr.keys():
+            return False
+        if attr.value and attr.value != self.attr[attr.key]:
+            return False
+        return True;
+
+    def remove_attribute(self, attr):
+        """ Remove an existing attribute. """
+        if self.select_attribute(attr):
+            del self.attr[attr.key]
+
+    def assign_attribute(self, attr):
+        """ Assign a new attribute. """
+        self.attr[attr.key] = attr.value
+
+
 class Note:
     """Interface to a single note.
 
@@ -84,10 +164,20 @@ class Note:
         else:
             self.rand = rand
         self.exts = exts
+        self._meta = None
 
     def __str__(self):
         return "Note(date=%s, rand=%08x, type=%s)" % (self.date, self.rand,
                                                       self.exts)
+    def __repr__(self):
+        return self.__str__()
+
+    @property
+    def meta(self):
+        """ Load metadata and return. """
+        if self._meta is None:
+            self._meta = NoteMetadata(self.realpath())
+        return self._meta
 
     def dirname(self):
         """ Return an absolute path for the note's directory. """
@@ -153,13 +243,16 @@ class Note:
         return date, rand
 
     def filename(self):
-        """ Return a list of the note's filenames. """
+        """ Return note's filename.
+
+            TODO: Should this be a @property? Same for realpath?
+        """
         head = self.head_encode()
         tail = self.tail_encode()
         return '%08x-%08x-%08x' % (head, tail, self.rand)
 
     def realpath(self):
-        """ Return a list of the note's abolute filenames. """
+        """ Return a note's abolute filename. """
         return os.path.join(self.dirname(), self.filename())
 
     def extensions(self):
@@ -296,6 +389,9 @@ class Note:
 
         return Note(date=date.astimezone(TZ_UTC), rand=Note.RAND_MIN)
 
+
+
+
 class NoteIterator:
     """ Iterate over a set of notes.
 
@@ -325,7 +421,7 @@ class NoteIterator:
     CURSOR_LABEL = ['root'] + NOTE_CUT_LABEL
 
     def __init__(self, since=None, until=None, reverse=False, index_set=None,
-                 index_max=None, type_filter=None):
+                 index_max=None, select=None, exclude=None):
         """ Initialise a NoteIterator.
 
         Args:
@@ -334,6 +430,8 @@ class NoteIterator:
             reverse: Iterate in reverse order, most recent note first.
             index_set: Sorted list of (min,max) index ranges to print.
             index_max: Maximum node index to print.
+            select: Select only notes with this attribute.
+            exclude: Exclude notes with this attribute.
 
         Invariants:
             len(self.stacks) = len(self.cursor) + 1
@@ -350,8 +448,6 @@ class NoteIterator:
 
          2  self.cursor = [NOTE_DIR, YEAR]
         """
-        assert type_filter is None, "Future implementation."
-
         self.cursor = []
         self.stacks = [[NOTE_DIR]]
 
@@ -366,6 +462,12 @@ class NoteIterator:
                 self.index_max = min(self.index_max, index_max)
         else:
             self.index_max = index_max
+
+        # Attributes
+        self.select_extensions, self.select_attributes = \
+                self.parse_attributes(select)
+        self.exclude_extensions, self.exclude_attributes = \
+                self.parse_attributes(exclude)
 
         # Compile patterns expected at cursor/stack depths.
         self.pattern = [None]
@@ -405,6 +507,21 @@ class NoteIterator:
                     done = True
                     break
         return note
+
+    def parse_attributes(self, attributes):
+        """ Divide attributes into extension and attribute filters."""
+        exts = set()
+        meta = set()
+        if attributes:
+            for attr in attributes:
+                if attr.key[0] == '.':
+                    if attr.value:
+                        raise ArgumentTypeError("Unexpected extension value: %s",
+                                                attr)
+                    exts.add(attr.key)
+                else:
+                    meta.add(attr)
+        return exts, meta
 
     def cursor_path(self):
         """ Return the current absolute cursor path. """
@@ -458,6 +575,31 @@ class NoteIterator:
                 return False
             if note.date == self.until.date and note.rand > self.until.rand:
                 return False
+
+        # Extension filters.
+        if self.select_extensions:
+            note.exts = [ext for ext in note.exts
+                         if ext in self.select_extensions]
+        if self.exclude_extensions:
+            note.exts = [ext for ext in note.exts
+                         if ext not in self.exclude_extensions]
+        if not note.exts:
+            return False
+
+        # Attribute filters.
+        if self.select_attributes:
+            match = False
+            for attr in self.select_attributes:
+                if note.meta.select_attribute(attr):
+                    match = True
+                    break
+            if match == False:
+                return False
+
+        if self.exclude_attributes:
+            for attr in self.exclude_attributes:
+                if note.meta.select_attribute(attr):
+                    return False
 
         return True
 
@@ -592,7 +734,10 @@ def main_list(notes, identify=False, filename=False, realpath=False):
         print("\tPath: %s" % path)
         exts = note.extensions()
         print("\tExts: %s" % exts)
-        print()
+        text = "\tAttr:"
+        for attr in note.meta.attributes():
+            text += " %s" % attr
+        print(text)
         for ext in exts:
             if ext in ['.txt', '.rst', '.md', '.mw']:
                 file = open(path + ext)
@@ -630,13 +775,21 @@ def main():
                     help='Stop after n notes.')
     ap.add_argument('-o', '--order', choices=['forward', 'reverse'],
                     default='reverse', help='Order notes.')
-    # Deprecated.
-    #ap.add_argument('-n', '--note', type=str, help='Note to act on.')
+
+    # Tagging.
+    ap.add_argument('-ts', '--tag-select', type=NoteAttribute.decode,
+                    nargs='*', help='Tag a note.')
+    ap.add_argument('-te', '--tag-exclude', type=NoteAttribute.decode,
+                    nargs='*', help='Exclude note with tag.')
+    ap.add_argument('-ta', '--tag-assign', type=NoteAttribute.decode,
+                    nargs='*', help='Assign tags to note(s).')
+    ap.add_argument('-tr', '--tag-remove', type=NoteAttribute.decode,
+                    nargs='*', help='Remove tags from note(s).')
 
     # Note Operation.
     ap.add_argument('-a', '--add', action='store_true', help='Add a note.')
     ap.add_argument('-e', '--edit', type=NoteIterator.argparse_range,
-                    nargs='?', help='Edit note(s).', default=SUPPRESS)
+                    nargs='?', help='Edit note(s). If not argument, edit all notes iterated on.', default=SUPPRESS)
     #ap.add_argument('-d', '--delete', action=store_true, help='Delete a note')
 
     # Output Modifies.
@@ -652,6 +805,7 @@ def main():
                     help='Output identities only')
 
     args = ap.parse_args()
+    #print(args)
 
     # 
     # Note date or identity.  RJS: Using notes as iterators?
@@ -675,7 +829,20 @@ def main():
                          since=args.since,
                          until=args.until,
                          index_max=args.count,
-                         index_set=args.index)
+                         index_set=args.index,
+                         select=args.tag_select,
+                         exclude=args.tag_exclude)
+
+    if args.tag_remove or args.tag_assign:
+        for note in notes:
+            if args.tag_remove:
+                for attr in args.tag_remove:
+                    note.meta.remove_attribute(attr)
+            if args.tag_assign:
+                for attr in args.tag_assign:
+                    note.meta.assign_attribute(attr)
+            note.meta.save()
+        return
 
     if hasattr(args, 'edit'):
         main_edit(notes)
