@@ -11,10 +11,12 @@ from dateutil import tz
 from functools import reduce
 import logging
 import os
+from pathlib import Path
 import pickle
 import random
 import re
 import subprocess
+from termcolor import colored
 
 
 #
@@ -107,6 +109,10 @@ class NoteMetadata:
         if self.attr:
             with open(self.filename, 'w+b') as metafile:
                 pickle.dump(self.attr, metafile)
+        else:
+            path = Path(self.filename)
+            if path.is_file():
+                path.unlink()
 
     def attributes(self):
         """ """
@@ -760,16 +766,17 @@ def main_list(notes, identify=False, filename=False, realpath=False):
             print()
         date = note.date.astimezone(TZ_LOCAL)
         date = date.strftime('%Y-%m-%dT%H:%M')
-        print("[%d]\tNNID: %s" % (notes.index, note.filename()))
-        print("\tDate: %s" % date)
+        text = "[%d]\tNNID: %s" % (notes.index, note.filename())
+        text += "\n\tDate: %s" % date
         path = note.realpath()
-        print("\tPath: %s" % path)
+        text += "\n\tPath: %s" % path
         exts = note.extensions()
-        print("\tExts: %s" % exts)
-        text = "\tAttr:"
+        text += "\n\tExts: %s" % exts
+        text += "\n\tAttr:"
         for attr in note.meta.attributes():
             text += " %s" % attr
-        print(text + "\n")
+        text += "\n"
+        print(colored(text, 'yellow'))
         for ext in exts:
             if ext in ['.txt', '.rst', '.md', '.mw']:
                 file = open(path + ext)
