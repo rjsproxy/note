@@ -4,6 +4,7 @@
 Toying with ideas of how to manage notes.
 
 """
+import subprocess
 from argparse import ArgumentParser, ArgumentTypeError, SUPPRESS
 from datetime import datetime, timedelta
 from dateutil import tz
@@ -26,7 +27,6 @@ def main_add():
 
 def main_list(notes, identify=False, filename=False, realpath=False):
     """ List notes to stdout (WIP). """
-    separate = False
     if filename:
         for note in notes:
             name = note.filename()
@@ -43,6 +43,30 @@ def main_list(notes, identify=False, filename=False, realpath=False):
         for note in notes:
             print(note.nnid_encode())
         return
+
+    # Print one note per line.
+    for note in notes:
+        line = ''
+        path = note.realpath()
+        for ext in note.extensions():
+            if ext in ['.txt', '.rst', '.md', '.mw']:
+                with open(path + ext) as file:
+                    for line in file:
+                        line = line.strip()
+                        if len(line) > 0:
+                            break
+                if len(line) > 0:
+                    break
+        attr = [str(a) for a in note.meta.attributes()]
+        if len(attr) > 0:
+            attr = '(' + ', '.join(attr) + ')'
+        else:
+            attr = ''
+        print("[%2d] %s %s" % (notes.index, line, attr))
+    return
+
+    # full dump.
+    separate = False
     for note in notes:
         if separate:
             print()

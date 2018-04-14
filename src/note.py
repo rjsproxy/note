@@ -2,7 +2,6 @@
 from pathlib import Path
 import pickle
 import random
-import subprocess
 """
 import os
 from functools import reduce
