@@ -1,3 +1,4 @@
+import re
 
 class NoteAttribute:
     """ Abstraction for note attributes.

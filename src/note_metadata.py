@@ -1,3 +1,8 @@
+import pickle
+from pathlib import Path
+
+from note_attribute import NoteAttribute
+
 class NoteMetadata:
     """ Note Metadata Interface. """
 
